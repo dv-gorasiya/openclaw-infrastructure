@@ -1,0 +1,23 @@
+# OpenClaw Infrastructure Configuration
+# Copy to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+
+region            = "eu-west-2"
+availability_zone = "eu-west-2a"
+environment       = "production"
+
+# Compute — t3.micro for free-tier eligible, t3.medium for production
+instance_type = "t3.micro"
+
+# Storage — 15GB data + 15GB root = 30GB (free tier limit)
+ebs_volume_size = 15
+
+# Alerts — REQUIRED: change this to your email
+alert_email = "you@example.com"
+
+# Backup retention (cost-optimized defaults)
+backup_retention_days  = 3
+backup_retention_weeks = 14
+
+# Optional features
+enable_cloudtrail = false  # Audit logging (~$2/month)
