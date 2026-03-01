@@ -151,28 +151,36 @@ CWCONFIG2
     -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s || \
     log "WARNING: CloudWatch Agent restart failed"
 
-# 8. Fetch secrets
-log "[8/12] Fetching secrets..."
-SECRETS_JSON=$(/usr/local/bin/aws secretsmanager get-secret-value \
-    --region "$REGION" --secret-id "$SECRETS_MANAGER_NAME" \
-    --query SecretString --output text) || error_exit "Failed to fetch secrets"
-
-ANTHROPIC_API_KEY=$(echo "$SECRETS_JSON" | jq -r '.ANTHROPIC_API_KEY // ""')
-OPENCLAW_GATEWAY_TOKEN=$(echo "$SECRETS_JSON" | jq -r '.OPENCLAW_GATEWAY_TOKEN // ""')
-TAILSCALE_AUTH_KEY=$(echo "$SECRETS_JSON" | jq -r '.TAILSCALE_AUTH_KEY // ""')
-
-# 9. Environment config
-log "[9/12] Writing environment config..."
-cat > /mnt/openclaw-data/.env <<EOF
-ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
-OPENCLAW_GATEWAY_TOKEN=$OPENCLAW_GATEWAY_TOKEN
+# 8. Create runtime secrets loader (fetches from Secrets Manager into tmpfs)
+log "[8/12] Configuring runtime secrets loader..."
+cat > /usr/local/bin/openclaw-load-secrets <<LOADEREOF
+#!/bin/bash
+set -euo pipefail
+mkdir -p /run/openclaw
+SECRETS=\$(/usr/local/bin/aws secretsmanager get-secret-value \\
+    --region "$REGION" --secret-id "$SECRETS_MANAGER_NAME" \\
+    --query SecretString --output text)
+cat > /run/openclaw/.env <<ENVEOF
+ANTHROPIC_API_KEY=\$(echo "\$SECRETS" | jq -r '.ANTHROPIC_API_KEY // ""')
+OPENCLAW_GATEWAY_TOKEN=\$(echo "\$SECRETS" | jq -r '.OPENCLAW_GATEWAY_TOKEN // ""')
 GATEWAY_PORT=$OPENCLAW_GATEWAY_PORT
 BROWSER_CONTROL_PORT=$OPENCLAW_BROWSER_PORT
 DATA_DIR=/mnt/openclaw-data
-EOF
+ENVEOF
+chown openclaw:openclaw /run/openclaw/.env
+chmod 600 /run/openclaw/.env
+LOADEREOF
+chmod 755 /usr/local/bin/openclaw-load-secrets
 
-chown openclaw:openclaw /mnt/openclaw-data/.env
-chmod 600 /mnt/openclaw-data/.env
+# 9. Verify secrets access works
+log "[9/12] Verifying Secrets Manager access..."
+/usr/local/bin/openclaw-load-secrets || error_exit "Failed to load secrets"
+log "Secrets loaded to /run/openclaw/.env (tmpfs — never written to disk)"
+
+# Fetch Tailscale key for step 12 (only needed during setup)
+TAILSCALE_AUTH_KEY=$(/usr/local/bin/aws secretsmanager get-secret-value \
+    --region "$REGION" --secret-id "$SECRETS_MANAGER_NAME" \
+    --query SecretString --output text | jq -r '.TAILSCALE_AUTH_KEY // ""')
 
 # 10. Install OpenClaw via npm (official method)
 log "[10/12] Installing OpenClaw..."
@@ -199,7 +207,9 @@ Type=simple
 User=openclaw
 Group=openclaw
 WorkingDirectory=/mnt/openclaw-data
-EnvironmentFile=/mnt/openclaw-data/.env
+RuntimeDirectory=openclaw
+ExecStartPre=+/usr/local/bin/openclaw-load-secrets
+EnvironmentFile=/run/openclaw/.env
 ExecStart=/usr/bin/env openclaw gateway --port $OPENCLAW_GATEWAY_PORT
 Restart=always
 RestartSec=10s

@@ -24,6 +24,7 @@ module "security" {
   source = "./modules/security"
 
   environment       = var.environment
+  ebs_volume_arn    = module.storage.ebs_volume_arn
   enable_cloudtrail = var.enable_cloudtrail
   tags              = local.common_tags
 }

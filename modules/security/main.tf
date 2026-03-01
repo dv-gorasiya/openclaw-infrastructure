@@ -52,8 +52,19 @@ resource "aws_iam_role_policy" "instance" {
       },
       {
         Effect   = "Allow"
-        Action   = ["ec2:AttachVolume", "ec2:DetachVolume", "ec2:DescribeVolumes", "ec2:DescribeInstances"]
+        Action   = ["ec2:DescribeVolumes", "ec2:DescribeInstances"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["ec2:AttachVolume", "ec2:DetachVolume"]
+        Resource = [
+          var.ebs_volume_arn,
+          "arn:aws:ec2:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:instance/*"
+        ]
+        Condition = {
+          StringEquals = { "aws:ResourceTag/Project" = "OpenClaw" }
+        }
       },
       {
         Effect   = "Allow"
@@ -161,3 +172,4 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
 }
 
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
