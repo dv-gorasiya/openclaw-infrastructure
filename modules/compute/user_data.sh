@@ -160,13 +160,18 @@ mkdir -p /run/openclaw
 SECRETS=\$(/usr/local/bin/aws secretsmanager get-secret-value \\
     --region "$REGION" --secret-id "$SECRETS_MANAGER_NAME" \\
     --query SecretString --output text)
-cat > /run/openclaw/.env <<ENVEOF
-ANTHROPIC_API_KEY=\$(echo "\$SECRETS" | jq -r '.ANTHROPIC_API_KEY // ""')
-OPENCLAW_GATEWAY_TOKEN=\$(echo "\$SECRETS" | jq -r '.OPENCLAW_GATEWAY_TOKEN // ""')
-GATEWAY_PORT=$OPENCLAW_GATEWAY_PORT
-BROWSER_CONTROL_PORT=$OPENCLAW_BROWSER_PORT
-DATA_DIR=/mnt/openclaw-data
-ENVEOF
+
+ANTHROPIC_KEY=\$(echo "\$SECRETS" | jq -r '.ANTHROPIC_API_KEY // ""')
+GATEWAY_TOKEN=\$(echo "\$SECRETS" | jq -r '.OPENCLAW_GATEWAY_TOKEN // ""')
+
+{
+  printf 'ANTHROPIC_API_KEY=%q\n' "\$ANTHROPIC_KEY"
+  printf 'OPENCLAW_GATEWAY_TOKEN=%q\n' "\$GATEWAY_TOKEN"
+  echo 'GATEWAY_PORT=$OPENCLAW_GATEWAY_PORT'
+  echo 'BROWSER_CONTROL_PORT=$OPENCLAW_BROWSER_PORT'
+  echo 'DATA_DIR=/mnt/openclaw-data'
+} > /run/openclaw/.env
+
 chown openclaw:openclaw /run/openclaw/.env
 chmod 600 /run/openclaw/.env
 LOADEREOF
@@ -209,8 +214,7 @@ Group=openclaw
 WorkingDirectory=/mnt/openclaw-data
 RuntimeDirectory=openclaw
 ExecStartPre=+/usr/local/bin/openclaw-load-secrets
-EnvironmentFile=/run/openclaw/.env
-ExecStart=/usr/bin/env openclaw gateway --port $OPENCLAW_GATEWAY_PORT
+ExecStart=/bin/bash -c 'set -a; source /run/openclaw/.env; exec openclaw gateway --port \$GATEWAY_PORT'
 Restart=always
 RestartSec=10s
 StandardOutput=journal
