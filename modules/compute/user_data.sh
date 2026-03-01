@@ -9,6 +9,17 @@ error_exit() { log "ERROR: $1"; exit 1; }
 
 log "========= OpenClaw Setup Started ========="
 
+# Create 1GB swap to prevent OOM during npm install on small instances
+log "[0/12] Creating swap file..."
+if [ ! -f /swapfile ]; then
+    dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    log "Swap enabled: $(swapon --show --noheadings)"
+fi
+
 REGION="${region}"
 SECRETS_MANAGER_NAME="${secrets_manager_name}"
 EBS_VOLUME_ID="${ebs_volume_id}"
@@ -76,7 +87,8 @@ id openclaw &>/dev/null || useradd -r -m -s /bin/bash openclaw
 
 # 7. Attach and mount EBS volume
 log "[7/12] Mounting EBS volume..."
-INSTANCE_ID=$(ec2-metadata --instance-id | cut -d " " -f 2)
+TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 
 for i in {1..30}; do
     VOLUME_STATE=$(/usr/local/bin/aws ec2 describe-volumes \
@@ -115,7 +127,25 @@ chown -R openclaw:openclaw /mnt/openclaw-data
 chmod 755 /mnt/openclaw-data
 log "EBS mounted at /mnt/openclaw-data"
 
-# Restart CW Agent now that mount exists
+# Restart CW Agent now that mount exists — rewrite config since fetch-config
+# moves the original file into the .d/ directory on first run
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCONFIG2'
+{
+  "agent": { "metrics_collection_interval": 300, "run_as_user": "root" },
+  "metrics": {
+    "namespace": "OpenClaw",
+    "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+    "metrics_collected": {
+      "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 300 },
+      "disk": {
+        "measurement": ["used_percent"],
+        "metrics_collection_interval": 300,
+        "resources": ["/mnt/openclaw-data", "/"]
+      }
+    }
+  }
+}
+CWCONFIG2
 /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
     -a fetch-config -m ec2 \
     -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s || \
@@ -144,20 +174,21 @@ EOF
 chown openclaw:openclaw /mnt/openclaw-data/.env
 chmod 600 /mnt/openclaw-data/.env
 
-# 10. Install OpenClaw
+# 10. Install OpenClaw via npm (official method)
 log "[10/12] Installing OpenClaw..."
 export HOME=/root
-curl -fsSL https://openclaw.ai/install.sh | bash || log "WARNING: OpenClaw install had issues"
+npm install -g openclaw@latest 2>&1 || error_exit "Failed to install OpenClaw via npm"
 
-if command -v openclaw &>/dev/null; then
-    log "OpenClaw installed: $(openclaw --version 2>/dev/null || echo 'unknown')"
+OPENCLAW_BIN=$(which openclaw 2>/dev/null || echo "")
+if [ -n "$OPENCLAW_BIN" ]; then
+    log "OpenClaw installed at $OPENCLAW_BIN: $(openclaw --version 2>/dev/null || echo 'unknown')"
 else
-    log "WARNING: openclaw not in PATH"
+    error_exit "openclaw binary not found in PATH after npm install"
 fi
 
 # 11. Systemd service
 log "[11/12] Configuring systemd service..."
-cat > /etc/systemd/system/openclaw.service <<'SVCEOF'
+cat > /etc/systemd/system/openclaw.service <<SVCEOF
 [Unit]
 Description=OpenClaw AI Assistant Gateway
 After=network-online.target
@@ -169,7 +200,7 @@ User=openclaw
 Group=openclaw
 WorkingDirectory=/mnt/openclaw-data
 EnvironmentFile=/mnt/openclaw-data/.env
-ExecStart=/bin/bash -c 'openclaw start || echo "OpenClaw not found"'
+ExecStart=/usr/bin/env openclaw gateway --port $OPENCLAW_GATEWAY_PORT
 Restart=always
 RestartSec=10s
 StandardOutput=journal
